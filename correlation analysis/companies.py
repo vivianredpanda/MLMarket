@@ -7,7 +7,7 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 
 
-X = pd.read_csv("stock_info_combined.csv")
+X = pd.read_csv("correlation analysis/cola_stock.csv")
 X = X.reset_index()
 
 X["Date"] = pd.to_datetime(X["Date"], format="%Y-%m-%d")
@@ -17,8 +17,7 @@ del X["Date"]
 del X["index"]
 # print(X)
 
-Y = pd.read_csv("chatgpt_interest.csv")
-Y = Y.drop(columns=["isPartial"])
+Y = pd.read_csv("correlation analysis/chatgpt_interest.csv")
 Y.columns = ["Date", "Frequency"]
 Y = Y.reset_index()
 del Y["Date"]
@@ -29,7 +28,7 @@ m, n = X.shape
 
 # test set is 10%
 # train set is 90%
-size = 0.9
+size = 0.90
 X_train = X.loc[: np.floor(m * size)]
 X_test = X.loc[np.floor(m * size) + 1 :]
 
@@ -83,14 +82,14 @@ plt.plot_date(
 )
 plt.legend(loc="upper center")
 plt.ylabel("Close prices")
-plt.title("Relative Frequency of Searches for ChatGPT Software")
+plt.title("Relative Frequency of Searches for Gemini Model")
 plt.grid()
 plt.show()
 
 
 ################################################
 
-futures = pd.read_csv("future_combined.csv")
+futures = pd.read_csv("correlation analysis/future_combined.csv")
 futures = futures.reset_index()
 
 futures["Date"] = pd.to_datetime(futures["Date"], format="%d-%m-%Y")
@@ -139,10 +138,24 @@ plt.plot_date(
 
 plt.legend(loc="upper center")
 plt.ylabel("Close prices")
-plt.title("Relative Frequency of Searches for ChatGPT Software")
+plt.title("Relative Frequency of Searches for Gemini Model")
 plt.grid()
 plt.show()
 
 
-# Residual sum of squares: 54.93
-# Variance score: 0.92
+# Coefficients:
+#  [[ 2.10461240e+00 -1.18396583e+00 -5.21542868e+00  3.17956528e+00
+#   -7.19464022e-01 -2.22871505e-01  1.09693835e+00 -5.73750827e-01
+#    1.65484576e-01 -5.03441007e-02 -1.75717413e-01  1.37737891e-02
+#   -1.86347300e-01  1.98483350e-03  5.36683248e-01 -1.63891399e-01
+#    3.21656735e-01]]
+# Residual sum of squares: 99.15
+# Variance score: 0.75
+
+
+# Coefficients:
+#  [[-0.29720429  1.55338538 -1.23579123 -0.52640018  0.34221763 -0.17439681
+#   -0.05031166  0.06233221  0.19890328  0.12168103 -0.38916758  0.10299491
+#   -0.44727883 -0.24446905  0.65436804 -0.06330862  0.20611944]]
+# Residual sum of squares: 49.03
+# Variance score: 0.94

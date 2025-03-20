@@ -1,12 +1,10 @@
 import numpy as np
-
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import Dataset
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader
 
 import matplotlib.pyplot as plt
 from matplotlib.pyplot import figure
@@ -22,7 +20,7 @@ config = {
     "company": {
         "name": "GOOG",
         "date": "2014-08-19",
-        "type": "Adj Close",
+        "type": "Close",
     },
     "plots": {
         "xticks_interval": 90,  # show a date every 90 days
@@ -49,26 +47,44 @@ config = {
 }
 
 
-def download_data(config):
-    comp = yf.download(
-        config["company"]["name"], start=config["company"]["date"], interval="1d"
-    )
-    comp = comp.reset_index()
-    print(comp)
-    data = comp[config["company"]["type"]]
-    data_date = list(comp["Date"].dt.strftime("%d-%m-%Y").to_numpy())
+def download_data(config, retries=3):
+    attempt = 0
+    while attempt < retries:
+        try:
+            comp = yf.download(
+                config["company"]["name"],
+                start=config["company"]["date"],
+                interval="1d",
+                timeout=10,  # You can increase this if needed.
+            )
+            if comp.empty:
+                raise ValueError("Downloaded DataFrame is empty.")
+            comp = comp.reset_index()
+            print(comp)
+            data = comp[config["company"]["type"]]
+            data_date = list(comp["Date"].dt.strftime("%d-%m-%Y").to_numpy())
 
-    val_type = config["company"]["type"]
-    print(val_type)
-    data_close_price = comp[val_type].to_numpy()
+            val_type = config["company"]["type"]
+            print(val_type)
+            data_close_price = comp[val_type].to_numpy()
 
-    num_data_points = len(data_date)
-    display_date_range = (
-        "from " + data_date[0] + " to " + data_date[num_data_points - 1]
-    )
-    print("Number data points", num_data_points, display_date_range)
+            num_data_points = len(data_date)
+            display_date_range = (
+                "from " + data_date[0] + " to " + data_date[num_data_points - 1]
+            )
+            print("Number data points", num_data_points, display_date_range)
 
-    return data_date, data_close_price, num_data_points, display_date_range
+            return data_date, data_close_price, num_data_points, display_date_range
+
+        except Exception as e:
+            print(f"Failed download on attempt {attempt + 1}/{retries}: {e}")
+            attempt += 1
+            if attempt >= retries:
+                raise RuntimeError("Data download failed after multiple attempts.")
+
+
+# Then later in your run_model function, just call:
+# (data_date, data_close_price, num_data_points, display_date_range) = download_data(config)
 
 
 class Normalizer:
@@ -77,8 +93,8 @@ class Normalizer:
         self.sd = None
 
     def fit_transform(self, x):
-        self.mu = np.mean(x, axis=(0), keepdims=True)
-        self.sd = np.std(x, axis=(0), keepdims=True)
+        self.mu = np.mean(x, axis=0, keepdims=True)
+        self.sd = np.std(x, axis=0, keepdims=True)
         normalized_x = (x - self.mu) / self.sd
         return normalized_x
 
@@ -96,9 +112,6 @@ def prepare_data_x(x, window_size):
 
 
 def prepare_data_y(x, window_size):
-    # # perform simple moving average
-    # output = np.convolve(x, np.ones(window_size), 'valid') / window_size
-
     # use the next day as label
     output = x[window_size:]
     return output
@@ -106,11 +119,10 @@ def prepare_data_y(x, window_size):
 
 class TimeSeriesDataset(Dataset):
     def __init__(self, x, y):
-        x = np.expand_dims(
-            x, 2
-        )  # in our case, we have only 1 feature, so we need to convert `x` into [batch, sequence, features] for LSTM
+        # add feature dimension
+        x = np.expand_dims(x, 2)  # [batch, sequence, features]
         self.x = x.astype(np.float32)
-        self.y = y.astype(np.float32)
+        self.y = y.astype(np.float32).reshape(-1, 1)  # ensure y is [batch, 1]
 
     def __len__(self):
         return len(self.x)
@@ -155,21 +167,17 @@ class LSTMModel(nn.Module):
 
     def forward(self, x):
         batchsize = x.shape[0]
-
-        # layer 1
+        # Layer 1
         x = self.linear_1(x)
         x = self.relu(x)
-
         # LSTM layer
         lstm_out, (h_n, c_n) = self.lstm(x)
-
-        # reshape output from hidden cell into [batch, features] for `linear_2`
+        # Reshape hidden state for linear layer
         x = h_n.permute(1, 0, 2).reshape(batchsize, -1)
-
-        # layer 2
+        # Layer 2
         x = self.dropout(x)
-        predictions = self.linear_2(x)
-        return predictions[:, -1]
+        predictions = self.linear_2(x)  # shape: [batch, 1]
+        return predictions  # Return predictions with shape [batch, 1]
 
 
 def run_epoch(dataloader, model, optimizer, criterion, scheduler, is_training=False):
@@ -184,8 +192,6 @@ def run_epoch(dataloader, model, optimizer, criterion, scheduler, is_training=Fa
         if is_training:
             optimizer.zero_grad()
 
-        batchsize = x.shape[0]
-
         x = x.to(config["training"]["device"])
         y = y.to(config["training"]["device"])
 
@@ -196,10 +202,10 @@ def run_epoch(dataloader, model, optimizer, criterion, scheduler, is_training=Fa
             loss.backward()
             optimizer.step()
 
+        batchsize = x.shape[0]
         epoch_loss += loss.detach().item() / batchsize
 
     lr = scheduler.get_last_lr()[0]
-
     return epoch_loss, lr
 
 
@@ -222,15 +228,13 @@ def run_model(shorten):
             num_data_points,
             display_date_range_temp,
         ) = download_data(config)
-
     else:
         data_date = data_date_temp
         data_close_price = data_close_price_temp
         num_data_points = num_data_points_temp
         display_date_range = display_date_range_temp
 
-    # plot
-
+    # Plot actual prices
     fig = figure(figsize=(25, 5), dpi=80)
     fig.patch.set_facecolor((1.0, 1.0, 1.0))
     plt.plot(
@@ -249,8 +253,8 @@ def run_model(shorten):
             else None
         )
         for i in range(num_data_points_temp)
-    ]  # make x ticks nice
-    x = np.arange(0, len(xticks))
+    ]
+    x = np.arange(len(xticks))
     plt.xticks(x, xticks, rotation="vertical")
     plt.title(
         "Daily close price for "
@@ -258,10 +262,10 @@ def run_model(shorten):
         + ", "
         + display_date_range_temp
     )
-    plt.grid(visible=None, which="major", axis="y", linestyle="--")
-    plt.show()
+    plt.grid(visible=True, which="major", axis="y", linestyle="--")
+    # plt.show()
 
-    # normalize
+    # Normalize
     scaler = Normalizer()
     normalized_data_close_price = scaler.fit_transform(data_close_price)
 
@@ -272,24 +276,22 @@ def run_model(shorten):
         normalized_data_close_price, window_size=config["data"]["window_size"]
     )
 
-    # split dataset
-
+    # Split dataset
     split_index = int(data_y.shape[0] * config["data"]["train_split_size"])
     data_x_train = data_x[:split_index]
     data_x_val = data_x[split_index:]
     data_y_train = data_y[:split_index]
     data_y_val = data_y[split_index:]
 
-    # prepare data for plotting
-
+    # Prepare data for plotting (training and validation)
     to_plot_data_y_train = np.zeros(num_data_points)
     to_plot_data_y_val = np.zeros(num_data_points)
 
     to_plot_data_y_train[
         config["data"]["window_size"] : split_index + config["data"]["window_size"]
-    ] = scaler.inverse_transform(data_y_train)
+    ] = scaler.inverse_transform(data_y_train).flatten()
     to_plot_data_y_val[split_index + config["data"]["window_size"] :] = (
-        scaler.inverse_transform(data_y_val)
+        scaler.inverse_transform(data_y_val).flatten()
     )
 
     to_plot_data_y_train = np.where(
@@ -297,8 +299,7 @@ def run_model(shorten):
     )
     to_plot_data_y_val = np.where(to_plot_data_y_val == 0, None, to_plot_data_y_val)
 
-    ## plots
-
+    # Plot training and validation prices
     fig = figure(figsize=(25, 5), dpi=80)
     fig.patch.set_facecolor((1.0, 1.0, 1.0))
     plt.plot(
@@ -326,30 +327,23 @@ def run_model(shorten):
             else None
         )
         for i in range(num_data_points)
-    ]  # make x ticks nice
-    x = np.arange(0, len(xticks))
+    ]
+    x = np.arange(len(xticks))
     plt.xticks(x, xticks, rotation="vertical")
     plt.title(
         "Daily close prices for "
         + config["company"]["name"]
         + " - showing training and validation data"
     )
-    plt.grid(visible=None, which="major", axis="y", linestyle="--")
+    plt.grid(visible=True, which="major", axis="y", linestyle="--")
     plt.legend()
-    plt.show()
+    # plt.show()
 
     dataset_train = TimeSeriesDataset(data_x_train, data_y_train)
     dataset_val = TimeSeriesDataset(data_x_val, data_y_val)
 
     print("Train data shape", dataset_train.x.shape, dataset_train.y.shape)
     print("Validation data shape", dataset_val.x.shape, dataset_val.y.shape)
-
-    train_dataloader = DataLoader(
-        dataset_train, batch_size=config["training"]["batch_size"], shuffle=True
-    )
-    val_dataloader = DataLoader(
-        dataset_val, batch_size=config["training"]["batch_size"], shuffle=True
-    )
 
     train_dataloader = DataLoader(
         dataset_train, batch_size=config["training"]["batch_size"], shuffle=True
@@ -397,8 +391,7 @@ def run_model(shorten):
             )
         )
 
-    # here we re-initialize dataloader so the data doesn't shuffled, so we can plot the values by date
-
+    # Re-initialize dataloaders without shuffling for plotting
     train_dataloader = DataLoader(
         dataset_train, batch_size=config["training"]["batch_size"], shuffle=False
     )
@@ -408,36 +401,31 @@ def run_model(shorten):
 
     model.eval()
 
-    # predict on the training data, to see how well the model managed to learn and memorize
-
-    predicted_train = np.array([])
-
+    # Predict on training data
+    predicted_train = []
     for idx, (x, y) in enumerate(train_dataloader):
         x = x.to(config["training"]["device"])
         out = model(x)
-        out = out.cpu().detach().numpy()
-        predicted_train = np.concatenate((predicted_train, out))
+        predicted_train.append(out.cpu().detach().numpy())
+    predicted_train = np.concatenate(predicted_train, axis=0).flatten()
 
-    # predict on the validation data, to see how the model does
-
-    predicted_val = np.array([])
-
+    # Predict on validation data
+    predicted_val = []
     for idx, (x, y) in enumerate(val_dataloader):
         x = x.to(config["training"]["device"])
         out = model(x)
-        out = out.cpu().detach().numpy()
-        predicted_val = np.concatenate((predicted_val, out))
+        predicted_val.append(out.cpu().detach().numpy())
+    predicted_val = np.concatenate(predicted_val, axis=0).flatten()
 
-    # prepare data for plotting
-
+    # Prepare data for plotting predictions
     to_plot_data_y_train_pred = np.zeros(num_data_points)
     to_plot_data_y_val_pred = np.zeros(num_data_points)
 
     to_plot_data_y_train_pred[
         config["data"]["window_size"] : split_index + config["data"]["window_size"]
-    ] = scaler.inverse_transform(predicted_train)
+    ] = scaler.inverse_transform(predicted_train.reshape(-1, 1)).flatten()
     to_plot_data_y_val_pred[split_index + config["data"]["window_size"] :] = (
-        scaler.inverse_transform(predicted_val)
+        scaler.inverse_transform(predicted_val.reshape(-1, 1)).flatten()
     )
 
     to_plot_data_y_train_pred = np.where(
@@ -447,7 +435,7 @@ def run_model(shorten):
         to_plot_data_y_val_pred == 0, None, to_plot_data_y_val_pred
     )
 
-    # plots
+    # Plot predictions vs. actual prices
     data_date_used, data_close_price_used, num_data_points_used = None, None, None
     if shorten:
         data_date_used = data_date_temp
@@ -501,20 +489,21 @@ def run_model(shorten):
             else None
         )
         for i in range(num_data_points_used)
-    ]  # make x ticks nice
-    x = np.arange(0, len(xticks))
+    ]
+    x = np.arange(len(xticks))
     plt.xticks(x, xticks, rotation="vertical")
-    plt.grid(visible=None, which="major", axis="y", linestyle="--")
+    plt.grid(visible=True, which="major", axis="y", linestyle="--")
     plt.legend()
-    plt.show()
+    # plt.show()
 
-    # prepare data for plotting the zoomed in view of the predicted prices (on validation set) vs. actual prices
-
-    to_plot_data_y_val_subset = scaler.inverse_transform(data_y_val)
-    to_plot_predicted_val = scaler.inverse_transform(predicted_val)
+    # Prepare zoomed in view for validation data predictions
+    to_plot_data_y_val_subset = scaler.inverse_transform(
+        data_y_val.reshape(-1, 1)
+    ).flatten()
+    to_plot_predicted_val = scaler.inverse_transform(
+        predicted_val.reshape(-1, 1)
+    ).flatten()
     to_plot_data_date = data_date[split_index + config["data"]["window_size"] :]
-
-    # plots
 
     fig = figure(figsize=(25, 5), dpi=80)
     fig.patch.set_facecolor((1.0, 1.0, 1.0))
@@ -545,23 +534,22 @@ def run_model(shorten):
             else None
         )
         for i in range(len(to_plot_data_date))
-    ]  # make x ticks nice
-    xs = np.arange(0, len(xticks))
+    ]
+    xs = np.arange(len(xticks))
     plt.xticks(xs, xticks, rotation="vertical")
-    plt.grid(visible=None, which="major", axis="y", linestyle="--")
+    plt.grid(visible=True, which="major", axis="y", linestyle="--")
     plt.legend()
-    plt.show()
+    # plt.show()
 
-    # print accuracy statistics
-    predicted = np.array(to_plot_predicted_val)
-    expected = np.array(to_plot_data_y_val_subset)
-    squarediff = np.square(predicted - expected)
-    mse = np.sum(squarediff) / len(predicted)
+    # Print accuracy statistics
+    predicted = to_plot_predicted_val
+    expected = to_plot_data_y_val_subset
+    mse = np.mean(np.square(predicted - expected))
     print("mean squared error ", mse)
     r_matrix = np.corrcoef(predicted, expected)
     print("correlation coefficient ", r_matrix[0, 1])
 
-    # predict the closing price of the next trading day
+    # Predict the closing price of the next trading day
     known_data_close_price = normalized_data_close_price.copy()
     prediction = []
     model.eval()
@@ -571,15 +559,16 @@ def run_model(shorten):
         data_x, data_x_unseen = prepare_data_x(
             known_data_close_price, window_size=config["data"]["window_size"]
         )
+        # data_x_unseen has shape (window_size,)
         x = (
             torch.tensor(data_x_unseen)
             .float()
             .to(config["training"]["device"])
             .unsqueeze(0)
             .unsqueeze(2)
-        )  # this is the data type and shape required, [batch, sequence, feature]
+        )
         predict = model(x)
-        predict = predict.cpu().detach().numpy()
+        predict = predict.cpu().detach().numpy().flatten()
         prediction.append(predict[0])
         known_data_close_price = np.append(known_data_close_price, predict)
         if config["data"]["window_size"] < num_data_points - 200:
@@ -587,7 +576,7 @@ def run_model(shorten):
         else:
             config["data"]["window_size"] = num_data_points
 
-    # prepare plots
+    # Prepare plot for future prediction
     plot_range = num_predictions * 11
     if plot_range > len(data_y_val):
         plot_range = len(data_y_val)
@@ -597,15 +586,14 @@ def run_model(shorten):
     to_plot_data_y_test_pred = np.zeros(plot_range)
 
     to_plot_data_y_val[: plot_range - num_predictions] = scaler.inverse_transform(
-        data_y_val
-    )[-plot_range + num_predictions :]
+        data_y_val.reshape(-1, 1)
+    ).flatten()[-plot_range + num_predictions :]
     to_plot_data_y_val_pred[: plot_range - num_predictions] = scaler.inverse_transform(
-        predicted_val
-    )[-plot_range + num_predictions :]
-
+        predicted_val.reshape(-1, 1)
+    ).flatten()[-plot_range + num_predictions :]
     to_plot_data_y_test_pred[plot_range - num_predictions :] = scaler.inverse_transform(
-        prediction
-    )
+        np.array(prediction).reshape(-1, 1)
+    ).flatten()
 
     to_plot_data_y_val = np.where(to_plot_data_y_val == 0, None, to_plot_data_y_val)
     to_plot_data_y_val_pred = np.where(
@@ -614,8 +602,6 @@ def run_model(shorten):
     to_plot_data_y_test_pred = np.where(
         to_plot_data_y_test_pred == 0, None, to_plot_data_y_test_pred
     )
-
-    # plot
 
     plot_date_test = data_date[-plot_range + num_predictions :]
     dates_to_print = []
@@ -659,7 +645,7 @@ def run_model(shorten):
             config["company"]["name"], config["company"]["type"]
         )
     )
-    plt.grid(visible=None, which="major", axis="y", linestyle="--")
+    plt.grid(visible=True, which="major", axis="y", linestyle="--")
     xticks = [
         (
             plot_date_test[i]
@@ -674,13 +660,15 @@ def run_model(shorten):
             else None
         )
         for i in range(len(plot_date_test))
-    ]  # make x ticks nice
-    x = np.arange(0, len(xticks))
+    ]
+    x = np.arange(len(xticks))
     plt.xticks(x, xticks, rotation="vertical")
     plt.legend()
-    plt.show()
+    # plt.show()
 
-    values_to_print = scaler.inverse_transform(prediction).tolist()
+    values_to_print = (
+        scaler.inverse_transform(np.array(prediction).reshape(-1, 1)).flatten().tolist()
+    )
     values_to_print = [round(elem, 2) for elem in values_to_print]
     print(dates_to_print)
     print(values_to_print)
