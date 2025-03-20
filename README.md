@@ -1,2 +1,2 @@
 # MLMarket
-Requires yfinance
+Requires yfinance, pandas, numpy, matplotlib, torch, datetime, sklearn, 
